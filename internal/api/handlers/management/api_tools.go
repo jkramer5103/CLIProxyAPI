@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clauderesets"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -135,6 +136,36 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	// Serialize the v8 manual reset path with automatic preflight and journal it
+	// too: a lost manual response must not trigger a fresh automatic claim.
+	isResetClaim := c.GetBool(ConfigV8ContextKey) && method == http.MethodPost && strings.EqualFold(parsedURL.Host, "api.anthropic.com") && strings.HasSuffix(parsedURL.Path, "/reset_rate_limits")
+	var resetEntry clauderesets.Entry
+	if isResetClaim {
+		if !bankedOAuth(auth) || h.resets == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_reset_account"})
+			return
+		}
+		unlock, errLock := h.resets.Lock()
+		if errLock != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "reset_claim_paused"})
+			return
+		}
+		defer unlock()
+		var claim struct {
+			Program string `json:"program"`
+			Grant   string `json:"grant_id"`
+			Request string `json:"request_id"`
+		}
+		if json.Unmarshal([]byte(body.Data), &claim) != nil || claim.Program != "cedar_ember" || !clauderesets.GrantID.MatchString(claim.Grant) || !clauderesets.RequestID.MatchString(claim.Request) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_reset_claim"})
+			return
+		}
+		if h.resets.Ready(auth.ID) != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "reset_claim_paused"})
+			return
+		}
+		resetEntry = clauderesets.Entry{GrantID: claim.Grant, RequestID: claim.Request}
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {
@@ -215,7 +246,35 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
-	resp, errDo := httpClient.Do(req)
+	if isResetClaim {
+		current := h.authByIndex(authIndex)
+		if !sameBankedSession(auth, current) {
+			c.JSON(http.StatusConflict, gin.H{"error": "reset_account_changed"})
+			return
+		}
+		var errJournal error
+		resetEntry, errJournal = h.resets.Begin(auth.ID, resetEntry.GrantID, resetEntry.RequestID)
+		if errJournal != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "reset_claim_paused"})
+			return
+		}
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		req.GetBody = nil
+	}
+	var resp *http.Response
+	var errDo error
+	if isResetClaim {
+		errDo = h.authManager.WithAccountOperation(c.Request.Context(), auth.ID, func(current *coreauth.Auth) error {
+			if !sameBankedSession(auth, current) {
+				return clauderesets.ErrPaused
+			}
+			var errCall error
+			resp, errCall = httpClient.Do(req)
+			return errCall
+		})
+	} else {
+		resp, errDo = httpClient.Do(req)
+	}
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
@@ -233,6 +292,9 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if isResetClaim {
+		_ = h.resets.Finish(auth.ID, resetEntry, resp.StatusCode, respBody)
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,

@@ -454,6 +454,9 @@ upstream:
     # credential serving it supports native tool search.
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
+    # Opt in to eligible Claude OAuth banked resets during their final five minutes.
+    # Unknown claim outcomes pause that account durably in banked-reset-journal/.
+    auto-apply-banked-resets: false
 
     # Days to retain the cloaked currentDate pin per session, so an idle gap or a credential
     # switch cannot re-anchor the date and invalidate earlier thinking signatures and the

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clauderesets"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
@@ -38,6 +39,11 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
+	resetsPreflightCancel   context.CancelFunc
+	resets                  *clauderesets.Engine
+	resetsLifeMu            sync.Mutex
+	resetsCancel            context.CancelFunc
+	resetsDone              chan struct{}
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
@@ -84,6 +90,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.resets = clauderesets.New(filepath.Join(filepath.Dir(configFilePath), "banked-reset-journal"))
 	h.startAttemptCleanup()
 	return h
 }
@@ -136,6 +143,9 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	if h.isStaleConfigFileSnapshotLocked(cloned) {
 		log.Debug("management: ignoring config reload parsed from an older config file version")
 		return
+	}
+	if h.resetsPreflightCancel != nil {
+		h.resetsPreflightCancel()
 	}
 	h.cfg = cloned
 }

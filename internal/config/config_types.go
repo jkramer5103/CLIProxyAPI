@@ -113,6 +113,8 @@ func defaultPluginInstanceConfigNode() *yaml.Node {
 
 // ClaudeConfig configures provider-wide Claude request behavior.
 type ClaudeConfig struct {
+	// AutoApplyBankedResets opts into server-side redemption in the final five minutes.
+	AutoApplyBankedResets bool `yaml:"auto-apply-banked-resets" json:"auto-apply-banked-resets"`
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`

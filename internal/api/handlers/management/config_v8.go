@@ -56,6 +56,22 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	yamlRequest := strings.HasSuffix(c.FullPath(), "/config.yaml")
 	if c.Request.Method == http.MethodGet {
+		// Advertise supported default-off automation even when omitted from YAML.
+		if !yamlRequest && (path == "" || path == "upstream/claude/auto-apply-banked-resets") && configV8Node(root, []string{"upstream", "claude", "auto-apply-banked-resets"}) == nil {
+			dst := root
+			for _, key := range []string{"upstream", "claude"} {
+				next := configV8Node(dst, []string{key})
+				if next == nil || next.Tag == "!!null" {
+					if next == nil {
+						next = &yaml.Node{}
+						dst.Content = append(dst.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, next)
+					}
+					*next = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+				}
+				dst = next
+			}
+			dst.Content = append(dst.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "auto-apply-banked-resets"}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"})
+		}
 		config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 		if !yamlRequest {
 			if servers := configV8Node(root, v8ICEServersPath); servers != nil && servers.Kind == yaml.SequenceNode {
@@ -206,6 +222,9 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// reload, so it is not overwritten on next here.
 	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
 		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
+	}
+	if h.resetsPreflightCancel != nil {
+		h.resetsPreflightCancel()
 	}
 	h.cfg = next
 	snapshot := h.reloadSnapshotConfigLocked()

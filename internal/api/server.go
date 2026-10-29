@@ -345,6 +345,9 @@ func (s *Server) Start() error {
 	s.muxHTTPListener = httpListener
 	s.listenerMu.Unlock()
 
+	s.mgmt.StartBankedResets()
+	defer s.mgmt.StopBankedResets()
+
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
 
@@ -418,6 +421,9 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+	if s.mgmt != nil {
+		s.mgmt.StopBankedResets()
+	}
 
 	if s.keepAliveEnabled {
 		select {
